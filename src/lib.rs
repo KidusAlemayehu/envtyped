@@ -55,3 +55,14 @@ pub enum EnvError {
 }
 
 
+pub impl EnvError{
+    pub fn name(&self) -> &str {
+        match self {
+            EnvError::Missing{ name }|
+            EnvError::NotUnicode{ name }|
+            EnvError::Invalid{ name , ..} => name,
+        }
+    }
+}
+
+
