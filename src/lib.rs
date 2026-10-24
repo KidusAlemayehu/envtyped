@@ -31,6 +31,8 @@
 
 use std::{env, error::Error, fmt, str:FromStr};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EnvError {
     // for handling if the variable is not set (missing)
     Missing {
@@ -40,7 +42,7 @@ pub enum EnvError {
     // for handing if the variable's value is not a valid unicode
     NotUnicode {
         name: String // the variable name
-    }
+    },
 
     // The variable value exists but couldn't be processed or parsed
     Invalid{
@@ -50,12 +52,11 @@ pub enum EnvError {
         value: String,
         // the reason why the processing or the parsing failed
         reason: String,
-    }
-    
+    },
 }
 
-
 pub impl EnvError{
+    // The name of the variable this error is about
     pub fn name(&self) -> &str {
         match self {
             EnvError::Missing{ name }|
@@ -66,3 +67,24 @@ pub impl EnvError{
 }
 
 
+impl fmt::Display for EnvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnvError::Missing { name } => {
+                write!(f, "environement variable `{name}` is not set")
+            }
+            EnvError::NotUnicode { name } => {
+                write!(f, "environment variable `{name}` is not a valid unicode value.")
+            }
+            EnvError::Invalid { name, value, reason } => {
+                write!(f, "environment variable `{name}` has invalid value `{value}` : {reason}")
+            }
+        }
+    }
+}
+
+impl Error for EnvError{}
+
+// Several [`EnvError`]s collected by a [`Loader`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Errors(Vec<EnvError>);
