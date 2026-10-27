@@ -2,5 +2,10 @@
 name = "envtyped"
 version = "0.1.0"
 edition = "2024"
+description = "Tiny, zero-dependency typed access to environment variables"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["env", "environment", "config", "configuration"]
+categories = ["config"]
 
 [dependencies]
