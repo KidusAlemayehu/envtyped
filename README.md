@@ -68,6 +68,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Real-World Web Application Example (with `.env` support)
+
+In production web applications (e.g. using Axum, Actix Web, or Rocket), configuration is typically structured into a typed `Config` struct. You can pair `envtyped` with `dotenvy` for seamless `.env` file support during local development:
+
+```toml
+[dependencies]
+envtyped = "0.1"
+dotenvy = "0.15" # Optional: for loading .env files in local dev
+```
+
+```rust
+use envtyped::{Loader, Errors};
+
+pub struct AppConfig {
+    pub host: String,
+    pub port: u16,
+    pub database_url: String,
+    pub jwt_secret: String,
+    pub max_connections: u32,
+    pub debug: bool,
+    pub sentry_dsn: Option<String>,
+}
+
+impl AppConfig {
+    pub fn from_env() -> Result<Self, Errors> {
+        let mut loader = Loader::new();
+
+        let config = Self {
+            host: loader.var_or("HOST", "127.0.0.1".into()),
+            port: loader.var_or("PORT", 8080),
+            database_url: loader.var("DATABASE_URL"),
+            jwt_secret: loader.var("JWT_SECRET"),
+            max_connections: loader.var_or("MAX_CONNECTIONS", 10),
+            debug: loader.var_bool_or("DEBUG", false),
+            sentry_dsn: loader.var_opt("SENTRY_DSN"),
+        };
+
+        // Validate all variables at once
+        loader.finish()?;
+
+        Ok(config)
+    }
+}
+
+fn main() {
+    // 1. Load `.env` file if present (ignored in production or if missing)
+    dotenvy::dotenv().ok();
+
+    // 2. Parse and validate all config at startup
+    let config = match AppConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(errs) => {
+            eprintln!("Configuration error:\n{errs}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("Starting server on {}:{}", config.host, config.port);
+}
+```
+
+If multiple variables are missing or malformed, the application halts immediately at startup with an exhaustive report instead of failing one-by-one:
+
+```text
+Configuration error:
+3 configuration errors:
+ - environment variable `DATABASE_URL` is not set
+ - environment variable `JWT_SECRET` is not set
+ - environment variable `PORT` has invalid value `eight-thousand`: invalid digit found in string
+```
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
