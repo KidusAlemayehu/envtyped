@@ -1,4 +1,4 @@
-use envtyped::{var, var_bool, var_bool_or, var_opt, var_or, EnvError, Loader};
+use typedenv::{var, var_bool, var_bool_or, var_opt, var_or, EnvError, Loader};
 use std::env;
 
 #[test]

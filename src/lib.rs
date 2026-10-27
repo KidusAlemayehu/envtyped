@@ -1,4 +1,4 @@
-//! # envtyped
+//! # typedenv
 //!
 //! Tiny, zero-dependency typed access to environment variables.
 //!
@@ -9,8 +9,8 @@
 //!
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # unsafe { std::env::set_var("ENVTYPED_DOC_PORT", "9000"); }
-//! let port: u16 = envtyped::var_or("ENVTYPED_DOC_PORT", 8080)?;
+//! # unsafe { std::env::set_var("TYPEDENV_DOC_PORT", "9000"); }
+//! let port: u16 = typedenv::var_or("TYPEDENV_DOC_PORT", 8080)?;
 //! assert_eq!(port, 9000);
 //! # Ok(())
 //! # }
@@ -19,9 +19,9 @@
 //! Collecting every error in one go:
 //!
 //! ```
-//! let mut cfg = envtyped::Loader::new();
-//! let _port: u16 = cfg.var_or("ENVTYPED_DOC_NOPE_PORT", 8080);
-//! let _db: String = cfg.var("ENVTYPED_DOC_NOPE_DB"); // missing -> recorded
+//! let mut cfg = typedenv::Loader::new();
+//! let _port: u16 = cfg.var_or("TYPEDENV_DOC_NOPE_PORT", 8080);
+//! let _db: String = cfg.var("TYPEDENV_DOC_NOPE_DB"); // missing -> recorded
 //! assert!(cfg.finish().is_err());
 //! ```
 

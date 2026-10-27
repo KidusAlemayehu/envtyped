@@ -1,4 +1,4 @@
-# envtyped
+# typedenv
 
 Tiny, zero-dependency typed access to environment variables in Rust.
 
@@ -13,17 +13,17 @@ Tiny, zero-dependency typed access to environment variables in Rust.
 
 ## Usage
 
-Add `envtyped` to your `Cargo.toml`:
+Add `typedenv` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-envtyped = "0.1"
+typedenv = "0.1"
 ```
 
 ### Basic Usage
 
 ```rust
-use envtyped::{var, var_or, var_opt, var_bool};
+use typedenv::{var, var_or, var_opt, var_bool};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Required variable
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Instead of stopping on the first missing or invalid environment variable, use `Loader` to collect every error and report them together:
 
 ```rust
-use envtyped::Loader;
+use typedenv::Loader;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut loader = Loader::new();
@@ -70,16 +70,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Real-World Web Application Example (with `.env` support)
 
-In production web applications (e.g. using Axum, Actix Web, or Rocket), configuration is typically structured into a typed `Config` struct. You can pair `envtyped` with `dotenvy` for seamless `.env` file support during local development:
+In production web applications (e.g. using Axum, Actix Web, or Rocket), configuration is typically structured into a typed `Config` struct. You can pair `typedenv` with `dotenvy` for seamless `.env` file support during local development:
 
 ```toml
 [dependencies]
-envtyped = "0.1"
+typedenv = "0.1"
 dotenvy = "0.15" # Optional: for loading .env files in local dev
 ```
 
 ```rust
-use envtyped::{Loader, Errors};
+use typedenv::{Loader, Errors};
 
 pub struct AppConfig {
     pub host: String,
