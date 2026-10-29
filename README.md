@@ -1,42 +1,50 @@
 # typedenv
 
-Tiny, zero-dependency typed access to environment variables in Rust.
+Tiny, zero-dependency typed access to environment variables in Rust with built-in `.env` file support and batch error reporting.
 
 ## Features
 
 - **Typed access**: Parse into any type `T: FromStr`.
+- **Delimited list parsing**: Parse separated values into `Vec<T>` with trimming, automatic empty-item filtering, and indexed error reporting (`var_list`, `var_list_or`).
+- **Built-in `.env` file support**: Load `.env` files directly into a `Loader` with zero external dependencies (`Loader::with_dotenv`).
+- **Thread-safe**: Does not mutate process-global environment variables (`std::env::set_var` is never called), preventing data races in multi-threaded programs.
 - **Strict defaults**: An environment variable that is set but invalid returns an error—it is never silently replaced by a default.
-- **Clear errors**: Tells you which variable failed, what the raw value was, and why parsing failed.
+- **Clear errors**: Identifies which variable, list index, or `.env` line number failed and why.
 - **Batch validation**: Collect all configuration errors in one go with `Loader`, instead of failing on the first one.
 - **Zero dependencies**: Pure standard library.
 - **Safe**: Built with `#![forbid(unsafe_code)]`.
 
-## Usage
+## Installation
 
 Add `typedenv` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-typedenv = "0.1"
+typedenv = "0.2"
 ```
 
-### Basic Usage
+## Quick Start
+
+### Basic Lookups
 
 ```rust
-use typedenv::{var, var_or, var_opt, var_bool};
+use typedenv::{var, var_or, var_opt, var_bool, var_list};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Required variable
     let database_url: String = var("DATABASE_URL")?;
 
-    // Variable with default (used only when unset)
+    // Variable with default (used only when unset; malformed value is an error)
     let port: u16 = var_or("PORT", 8080)?;
 
-    // Optional variable
+    // Optional variable: Ok(None) when unset
     let sentry_dsn: Option<String> = var_opt("SENTRY_DSN")?;
 
-    // Boolean (supports true/false/1/0/yes/no/y/n/on/off)
+    // Boolean (supports true/false/1/0/yes/no/y/n/on/off, case-insensitive)
     let debug: bool = var_bool("DEBUG")?;
+
+    // Delimited list (splits on sep, trims items, skips empty entries)
+    let allowed_hosts: Vec<String> = var_list("ALLOWED_HOSTS", ',')?;
 
     Ok(())
 }
@@ -44,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Reporting All Errors at Once with `Loader`
 
-Instead of stopping on the first missing or invalid environment variable, use `Loader` to collect every error and report them together:
+Instead of stopping on the first missing or invalid environment variable, use `Loader` to collect every error across lookups and report them together:
 
 ```rust
 use typedenv::Loader;
@@ -57,26 +65,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool_size: usize = loader.var_or("POOL_SIZE", 10);
     let secret_key: String = loader.var("SECRET_KEY");
     let metrics: bool = loader.var_bool_or("METRICS_ENABLED", true);
+    let cors_origins: Vec<String> = loader.var_list("CORS_ORIGINS", ',');
 
-    // Call finish() and check for errors
+    // Validate all lookups at once
     loader.finish()?;
 
-    // Values are safe to use here
-    println!("Server starting at {host}:{port}");
-
+    // Values are validated and safe to use here
+    println!("Server starting on {host}:{port}");
     Ok(())
 }
 ```
 
-### Real-World Web Application Example (with `.env` support)
+---
 
-In production web applications (e.g. using Axum, Actix Web, or Rocket), configuration is typically structured into a typed `Config` struct. You can pair `typedenv` with `dotenvy` for seamless `.env` file support during local development:
+### Loading `.env` Files (Zero-Dependency)
 
-```toml
-[dependencies]
-typedenv = "0.1"
-dotenvy = "0.15" # Optional: for loading .env files in local dev
+`typedenv` includes an in-tree `.env` file parser enabled by default. You can load `.env` files into a `Loader` without adding external crates:
+
+```rust
+use typedenv::Loader;
+
+let mut loader = Loader::new()
+    .with_dotenv(".env")
+    .with_dotenv(".env.local"); // earlier files or real env take precedence
+
+let database_url: String = loader.var("DATABASE_URL");
+let port: u16 = loader.var_or("PORT", 8080);
+loader.finish()?;
 ```
+
+#### `.env` Precedence & Safety Rules
+
+1. **Real environment variables always win**: Real OS/container variables take precedence over values in `.env` files.
+2. **First file wins**: If multiple files define the same key, the file loaded first wins.
+3. **Missing files are ignored**: A missing file (e.g. in staging/production environments) is ignored silently.
+4. **Syntax errors are collected**: Files with syntax errors are recorded and reported in `Loader::finish()`.
+5. **No process mutation**: The process-global environment table is never modified, making it safe in multi-threaded applications.
+
+#### Supported `.env` Syntax
+
+- `KEY=value` and `export KEY=value`
+- Line comments (`# comment`) and trailing comments (`KEY=value # comment`)
+- Double quotes (`"..."`) with escape sequences (`\n`, `\t`, `\r`, `\"`, `\\`)
+- Single quotes (`'...'`) for raw string literals
+- Whitespace trimming around keys and unquoted values
+
+---
+
+### Real-World Web Application Example
+
+In production web applications (e.g. using Axum, Actix Web, or Rocket), configuration is typically structured into a typed `AppConfig` struct:
 
 ```rust
 use typedenv::{Loader, Errors};
@@ -89,11 +127,14 @@ pub struct AppConfig {
     pub max_connections: u32,
     pub debug: bool,
     pub sentry_dsn: Option<String>,
+    pub cors_origins: Vec<String>,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self, Errors> {
-        let mut loader = Loader::new();
+        let mut loader = Loader::new()
+            .with_dotenv(".env")
+            .with_dotenv(".env.local");
 
         let config = Self {
             host: loader.var_or("HOST", "127.0.0.1".into()),
@@ -103,6 +144,7 @@ impl AppConfig {
             max_connections: loader.var_or("MAX_CONNECTIONS", 10),
             debug: loader.var_bool_or("DEBUG", false),
             sentry_dsn: loader.var_opt("SENTRY_DSN"),
+            cors_origins: loader.var_list_or("CORS_ORIGINS", ',', vec!["*".into()]),
         };
 
         // Validate all variables at once
@@ -113,10 +155,6 @@ impl AppConfig {
 }
 
 fn main() {
-    // 1. Load `.env` file if present (ignored in production or if missing)
-    dotenvy::dotenv().ok();
-
-    // 2. Parse and validate all config at startup
     let config = match AppConfig::from_env() {
         Ok(cfg) => cfg,
         Err(errs) => {
@@ -129,7 +167,7 @@ fn main() {
 }
 ```
 
-If multiple variables are missing or malformed, the application halts immediately at startup with an exhaustive report instead of failing one-by-one:
+If multiple variables are missing or malformed, the application halts immediately at startup with an exhaustive batch report:
 
 ```text
 Configuration error:
@@ -138,6 +176,8 @@ Configuration error:
  - environment variable `JWT_SECRET` is not set
  - environment variable `PORT` has invalid value `eight-thousand`: invalid digit found in string
 ```
+
+---
 
 ## License
 

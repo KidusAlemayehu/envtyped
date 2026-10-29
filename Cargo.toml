@@ -1,6 +1,6 @@
 [package]
 name = "typedenv"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Tiny, zero-dependency typed access to environment variables"
 license = "MIT OR Apache-2.0"
@@ -10,3 +10,8 @@ keywords = ["env", "environment", "config", "configuration"]
 categories = ["config"]
 
 [dependencies]
+
+[features]
+default = ["dotenv"]
+# Load `.env` files into a Loader (no extra dependencies).
+dotenv = []

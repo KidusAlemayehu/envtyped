@@ -28,7 +28,9 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![warn(missing_docs)]
 
-use std::{env, error::Error, fmt, str::FromStr};
+use std::{collections::HashMap, env, error::Error, fmt, str::FromStr};
+
+type FileVars = HashMap<String, String>;
 
 /// An error that occurred while reading or parsing an environment variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,15 +57,27 @@ pub enum EnvError {
         /// The reason why parsing or processing failed.
         reason: String,
     },
+
+    /// An `.env` file could not be read or contains a syntax error.
+    Dotenv {
+        /// Path to the file.
+        path: String,
+        /// 1-based line number, if the problem occurred on a specific line.
+        line: Option<usize>,
+        /// Reason describing what went wrong.
+        reason: String,
+    },
 }
 
 impl EnvError {
-    /// The name of the variable this error is about.
-    pub fn name(&self) -> &str {
+    /// The name of the variable this error is about, or `None` if the error
+    /// is file-scoped (such as an `.env` I/O or syntax error).
+    pub fn name(&self) -> Option<&str> {
         match self {
             EnvError::Missing { name }
             | EnvError::NotUnicode { name }
-            | EnvError::Invalid { name, .. } => name,
+            | EnvError::Invalid { name, .. } => Some(name),
+            EnvError::Dotenv { .. } => None,
         }
     }
 }
@@ -81,6 +95,20 @@ impl fmt::Display for EnvError {
                 f,
                 "environment variable `{name}` has invalid value `{value}`: {reason}"
             ),
+            EnvError::Dotenv {
+                path,
+                line: Some(line),
+                reason,
+            } => {
+                write!(f, "{path}:{line}: invalid .env syntax: {reason}")
+            }
+            EnvError::Dotenv {
+                path,
+                line: None,
+                reason,
+            } => {
+                write!(f, "could not read `{path}`: {reason}")
+            }
         }
     }
 }
@@ -175,9 +203,28 @@ fn parse_bool(s: &str) -> Result<bool, String> {
     }
 }
 
+/// Splits on `sep`, trims items, and skips empty items.
+fn parse_list<T>(s: &str, sep: char) -> Result<Vec<T>, String>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    let mut out = Vec::new();
+    let items = s.split(sep).map(str::trim).filter(|x| !x.is_empty());
+
+    for (i, item) in items.enumerate() {
+        let v = item
+            .parse::<T>()
+            .map_err(|e| format!("item {} (`{item}`): {e}", i + 1))?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
 /// Reads and parses a variable. `Ok(None)` means "not set".
 fn read<T>(
     name: &str,
+    file: &FileVars,
     parse: impl FnOnce(&str) -> Result<T, String>,
 ) -> Result<Option<T>, EnvError> {
     match env::var(name) {
@@ -189,11 +236,29 @@ fn read<T>(
                 reason,
             }),
         },
-        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotPresent) => match file.get(name) {
+            Some(raw) => match parse(raw.trim()) {
+                Ok(v) => Ok(Some(v)),
+                Err(reason) => Err(EnvError::Invalid {
+                    name: name.to_string(),
+                    value: raw.clone(),
+                    reason,
+                }),
+            },
+            None => Ok(None),
+        },
         Err(env::VarError::NotUnicode(_)) => Err(EnvError::NotUnicode {
             name: name.to_string(),
         }),
     }
+}
+
+fn read_env<T>(
+    name: &str,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<Option<T>, EnvError> {
+    let empty = FileVars::new();
+    read(name, &empty, parse)
 }
 
 fn missing(name: &str) -> EnvError {
@@ -208,7 +273,7 @@ where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    read(name, parse_str::<T>)?.ok_or_else(|| missing(name))
+    read_env(name, parse_str::<T>)?.ok_or_else(|| missing(name))
 }
 
 /// Reads a variable, using `default` only when it is **unset**.
@@ -219,7 +284,7 @@ where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    Ok(read(name, parse_str::<T>)?.unwrap_or(default))
+    Ok(read_env(name, parse_str::<T>)?.unwrap_or(default))
 }
 
 /// Reads an optional variable: `Ok(None)` when unset.
@@ -228,18 +293,46 @@ where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    read(name, parse_str::<T>)
+    read_env(name, parse_str::<T>)
 }
 
 /// Reads a required boolean. Accepts `true/false/1/0/yes/no/y/n/on/off`
 /// (case-insensitive).
 pub fn var_bool(name: &str) -> Result<bool, EnvError> {
-    read(name, parse_bool)?.ok_or_else(|| missing(name))
+    read_env(name, parse_bool)?.ok_or_else(|| missing(name))
 }
 
 /// Reads a boolean, using `default` only when unset.
 pub fn var_bool_or(name: &str, default: bool) -> Result<bool, EnvError> {
-    Ok(read(name, parse_bool)?.unwrap_or(default))
+    Ok(read_env(name, parse_bool)?.unwrap_or(default))
+}
+
+/// Reads a required list, split on `sep`. Items are trimmed and empty items
+/// are skipped, so `"a, b,"` is `["a", "b"]`. A set-but-empty variable is an
+/// empty list.
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// let ports = typedenv::var_list_or("TYPEDENV_DOC_UNSET_PORTS", ',', vec![80u16, 443])?;
+/// assert_eq!(ports, [80, 443]);
+/// # Ok(())
+/// # }
+/// ```
+pub fn var_list<T>(name: &str, sep: char) -> Result<Vec<T>, EnvError>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    read_env(name, |s| parse_list::<T>(s, sep))?.ok_or_else(|| missing(name))
+}
+
+/// Like [`var_list`], using `default` only when the variable is unset.
+pub fn var_list_or<T>(name: &str, sep: char, default: Vec<T>) -> Result<Vec<T>, EnvError>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    Ok(read_env(name, |s| parse_list::<T>(s, sep))?.unwrap_or(default))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +348,7 @@ pub fn var_bool_or(name: &str, default: bool) -> Result<bool, EnvError> {
 #[derive(Debug, Default)]
 pub struct Loader {
     errors: Vec<EnvError>,
+    file: FileVars,
 }
 
 impl Loader {
@@ -263,16 +357,28 @@ impl Loader {
         Self::default()
     }
 
-    /// Required variable. Returns `T::default()` and records an error on failure.
-    ///
-    /// For types that do not implement [`Default`], consider [`Loader::var_or`]
-    /// or [`Loader::var_opt`].
-    pub fn var<T>(&mut self, name: &str) -> T
-    where
-        T: FromStr + Default,
-        T::Err: fmt::Display,
-    {
-        match read(name, parse_str::<T>) {
+    /// `None` if unset or invalid (invalid is recorded).
+    fn lookup<T>(
+        &mut self,
+        name: &str,
+        parse: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Option<T> {
+        match read(name, &self.file, parse) {
+            Ok(v) => v,
+            Err(e) => {
+                self.errors.push(e);
+                None
+            }
+        }
+    }
+
+    /// Like `lookup`, but unset is also an error. Returns `T::default()` on failure.
+    fn lookup_required<T: Default>(
+        &mut self,
+        name: &str,
+        parse: impl FnOnce(&str) -> Result<T, String>,
+    ) -> T {
+        match read(name, &self.file, parse) {
             Ok(Some(v)) => v,
             Ok(None) => {
                 self.errors.push(missing(name));
@@ -285,6 +391,64 @@ impl Loader {
         }
     }
 
+    /// Loads a `.env` file as a fallback source.
+    ///
+    /// * Real environment variables always win over the file.
+    /// * If several files define a key, the one loaded **first** wins.
+    /// * A file that does not exist is ignored; one that cannot be read or has
+    ///   syntax errors is recorded and reported by [`Loader::finish`].
+    /// * The process environment is never modified.
+    ///
+    /// Supported syntax: `KEY=value`, `export KEY=value`, `#` comments (full
+    /// line or after whitespace), `"double quoted"` values with `\n \t \" \\`
+    /// escapes, and `'single quoted'` literals. There is no `$VAR` expansion.
+    ///
+    /// ```
+    /// let mut cfg = typedenv::Loader::new().with_dotenv(".env.does-not-exist");
+    /// let port: u16 = cfg.var_or("TYPEDENV_DOC_DOTENV_PORT", 8080);
+    /// assert_eq!(port, 8080);
+    /// assert!(cfg.finish().is_ok());
+    /// ```
+    #[cfg(feature = "dotenv")]
+    pub fn with_dotenv(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        let path = path.as_ref();
+        let shown = path.display().to_string();
+        match std::fs::read_to_string(path) {
+            Ok(src) => {
+                let (vars, errs) = parse_dotenv(&src);
+                for (line, reason) in errs {
+                    self.errors.push(EnvError::Dotenv {
+                        path: shown.clone(),
+                        line: Some(line),
+                        reason,
+                    });
+                }
+                for (k, v) in vars {
+                    self.file.entry(k).or_insert(v);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.errors.push(EnvError::Dotenv {
+                path: shown,
+                line: None,
+                reason: e.to_string(),
+            }),
+        }
+        self
+    }
+
+    /// Required variable. Returns `T::default()` and records an error on failure.
+    ///
+    /// For types that do not implement [`Default`], consider [`Loader::var_or`]
+    /// or [`Loader::var_opt`].
+    pub fn var<T>(&mut self, name: &str) -> T
+    where
+        T: FromStr + Default,
+        T::Err: fmt::Display,
+    {
+        self.lookup_required(name, parse_str::<T>)
+    }
+
     /// Variable with a default used only when unset. Malformed values are
     /// recorded as errors (and `default` is returned as a placeholder).
     pub fn var_or<T>(&mut self, name: &str, default: T) -> T
@@ -292,7 +456,7 @@ impl Loader {
         T: FromStr,
         T::Err: fmt::Display,
     {
-        match read(name, parse_str::<T>) {
+        match read(name, &self.file, parse_str::<T>) {
             Ok(Some(v)) => v,
             Ok(None) => default,
             Err(e) => {
@@ -309,33 +473,42 @@ impl Loader {
         T: FromStr,
         T::Err: fmt::Display,
     {
-        match read(name, parse_str::<T>) {
-            Ok(v) => v,
-            Err(e) => {
-                self.errors.push(e);
-                None
-            }
-        }
+        self.lookup(name, parse_str::<T>)
     }
 
     /// Required boolean (`true/false/1/0/yes/no/y/n/on/off`).
     pub fn var_bool(&mut self, name: &str) -> bool {
-        match read(name, parse_bool) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                self.errors.push(missing(name));
-                false
-            }
-            Err(e) => {
-                self.errors.push(e);
-                false
-            }
-        }
+        self.lookup_required(name, parse_bool)
     }
 
     /// Boolean with a default used only when unset.
     pub fn var_bool_or(&mut self, name: &str, default: bool) -> bool {
-        match read(name, parse_bool) {
+        match read(name, &self.file, parse_bool) {
+            Ok(Some(v)) => v,
+            Ok(None) => default,
+            Err(e) => {
+                self.errors.push(e);
+                default
+            }
+        }
+    }
+
+    /// Required list split on `sep`. Returns an empty vector on failure and records an error.
+    pub fn var_list<T>(&mut self, name: &str, sep: char) -> Vec<T>
+    where
+        T: FromStr,
+        T::Err: fmt::Display,
+    {
+        self.lookup_required(name, |s| parse_list::<T>(s, sep))
+    }
+
+    /// List with a default used only when unset.
+    pub fn var_list_or<T>(&mut self, name: &str, sep: char, default: Vec<T>) -> Vec<T>
+    where
+        T: FromStr,
+        T::Err: fmt::Display,
+    {
+        match read(name, &self.file, |s| parse_list::<T>(s, sep)) {
             Ok(Some(v)) => v,
             Ok(None) => default,
             Err(e) => {
@@ -352,6 +525,108 @@ impl Loader {
             Ok(())
         } else {
             Err(Errors(self.errors))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// .env parsing
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "dotenv")]
+fn parse_dotenv(src: &str) -> (FileVars, Vec<(usize, String)>) {
+    let mut vars = FileVars::new();
+    let mut errs = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let n = i + 1;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line
+            .strip_prefix("export ")
+            .map(str::trim_start)
+            .unwrap_or(line);
+        let Some((key, rest)) = line.split_once('=') else {
+            errs.push((n, "expected KEY=VALUE".to_string()));
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || key.chars().any(char::is_whitespace) {
+            errs.push((n, format!("invalid key `{key}`")));
+            continue;
+        }
+        match parse_value(rest.trim()) {
+            Ok(v) => {
+                vars.insert(key.to_string(), v);
+            }
+            Err(reason) => errs.push((n, reason)),
+        }
+    }
+    (vars, errs)
+}
+
+#[cfg(feature = "dotenv")]
+fn check_trailing(t: &str) -> Result<(), String> {
+    let t = t.trim();
+    if t.is_empty() || t.starts_with('#') {
+        Ok(())
+    } else {
+        Err(format!("unexpected text after closing quote: `{t}`"))
+    }
+}
+
+#[cfg(feature = "dotenv")]
+fn parse_value(s: &str) -> Result<String, String> {
+    if s.starts_with('#') {
+        return Ok(String::new());
+    }
+    match s.chars().next() {
+        Some('"') => {
+            let mut out = String::new();
+            let mut escaped = false;
+            let mut end = None;
+            for (i, c) in s.char_indices().skip(1) {
+                if escaped {
+                    out.push(match c {
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        other => other,
+                    });
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    end = Some(i + 1);
+                    break;
+                } else {
+                    out.push(c);
+                }
+            }
+            let end = end.ok_or_else(|| "unterminated double quote".to_string())?;
+            check_trailing(&s[end..])?;
+            Ok(out)
+        }
+        Some('\'') => {
+            let rest = &s[1..];
+            let close = rest
+                .find('\'')
+                .ok_or_else(|| "unterminated single quote".to_string())?;
+            check_trailing(&rest[close + 1..])?;
+            Ok(rest[..close].to_string())
+        }
+        _ => {
+            let mut cut = s.len();
+            let mut prev_ws = false;
+            for (i, c) in s.char_indices() {
+                if c == '#' && prev_ws {
+                    cut = i;
+                    break;
+                }
+                prev_ws = c.is_whitespace();
+            }
+            Ok(s[..cut].trim_end().to_string())
         }
     }
 }
@@ -374,97 +649,180 @@ mod tests {
 
     #[test]
     fn parses_defaults_and_optional() {
-        set("ENVTYPED_T1_PORT", " 8081 ");
-        assert_eq!(var::<u16>("ENVTYPED_T1_PORT").unwrap(), 8081);
-        assert_eq!(var_or("ENVTYPED_T1_MISSING", 8080u16).unwrap(), 8080);
-        assert_eq!(var_opt::<u16>("ENVTYPED_T1_MISSING").unwrap(), None);
+        set("TYPEDENV_T1_PORT", " 8081 ");
+        assert_eq!(var::<u16>("TYPEDENV_T1_PORT").unwrap(), 8081);
+        assert_eq!(var_or("TYPEDENV_T1_MISSING", 8080u16).unwrap(), 8080);
+        assert_eq!(var_opt::<u16>("TYPEDENV_T1_MISSING").unwrap(), None);
     }
 
     #[test]
     fn missing_required_is_error() {
-        let e = var::<u16>("ENVTYPED_T2_MISSING").unwrap_err();
+        let e = var::<u16>("TYPEDENV_T2_MISSING").unwrap_err();
         assert_eq!(
             e,
             EnvError::Missing {
-                name: "ENVTYPED_T2_MISSING".into()
+                name: "TYPEDENV_T2_MISSING".into()
             }
         );
     }
 
     #[test]
     fn invalid_value_is_not_swallowed_by_default() {
-        set("ENVTYPED_T3_BAD", "abc");
-        let e = var_or("ENVTYPED_T3_BAD", 1u16).unwrap_err();
+        set("TYPEDENV_T3_BAD", "abc");
+        let e = var_or("TYPEDENV_T3_BAD", 1u16).unwrap_err();
         assert!(matches!(e, EnvError::Invalid { .. }));
-        assert_eq!(e.name(), "ENVTYPED_T3_BAD");
+        assert_eq!(e.name(), Some("TYPEDENV_T3_BAD"));
         assert!(e.to_string().contains("`abc`"));
     }
 
     #[test]
     fn bool_forms() {
         for (raw, want) in [("1", true), ("YES", true), ("on", true), ("0", false), ("No", false)] {
-            set("ENVTYPED_T4_BOOL", raw);
-            assert_eq!(var_bool("ENVTYPED_T4_BOOL").unwrap(), want, "{raw}");
+            set("TYPEDENV_T4_BOOL", raw);
+            assert_eq!(var_bool("TYPEDENV_T4_BOOL").unwrap(), want, "{raw}");
         }
-        set("ENVTYPED_T4_BOOL", "maybe");
-        assert!(var_bool("ENVTYPED_T4_BOOL").is_err());
-        assert!(var_bool_or("ENVTYPED_T4_UNSET", true).unwrap());
+        set("TYPEDENV_T4_BOOL", "maybe");
+        assert!(var_bool("TYPEDENV_T4_BOOL").is_err());
+        assert!(var_bool_or("TYPEDENV_T4_UNSET", true).unwrap());
     }
 
     #[test]
     fn loader_collects_all_errors() {
-        set("ENVTYPED_T5_PORT", "abc");
-        set("ENVTYPED_T5_DEBUG", "maybe");
+        set("TYPEDENV_T5_PORT", "abc");
+        set("TYPEDENV_T5_DEBUG", "maybe");
 
         let mut cfg = Loader::new();
-        let _port: u16 = cfg.var_or("ENVTYPED_T5_PORT", 8080);
-        let _debug = cfg.var_bool_or("ENVTYPED_T5_DEBUG", false);
-        let _db: String = cfg.var("ENVTYPED_T5_DB");
-        let _ok: u16 = cfg.var_or("ENVTYPED_T5_FINE", 1);
+        let _port: u16 = cfg.var_or("TYPEDENV_T5_PORT", 8080);
+        let _debug = cfg.var_bool_or("TYPEDENV_T5_DEBUG", false);
+        let _db: String = cfg.var("TYPEDENV_T5_DB");
+        let _ok: u16 = cfg.var_or("TYPEDENV_T5_FINE", 1);
 
         let errs = cfg.finish().unwrap_err();
         assert_eq!(errs.len(), 3);
         let text = errs.to_string();
         assert!(text.starts_with("3 configuration errors:"));
-        assert!(text.contains("ENVTYPED_T5_DB"));
+        assert!(text.contains("TYPEDENV_T5_DB"));
     }
 
     #[test]
     fn loader_ok_when_everything_valid() {
-        set("ENVTYPED_T6_PORT", "9000");
+        set("TYPEDENV_T6_PORT", "9000");
         let mut cfg = Loader::new();
-        let port: u16 = cfg.var("ENVTYPED_T6_PORT");
+        let port: u16 = cfg.var("TYPEDENV_T6_PORT");
         assert_eq!(port, 9000);
         assert!(cfg.finish().is_ok());
     }
 
     #[test]
-    fn test_env_error_name() {
-        let err1 = EnvError::Missing {
-            name: "FOO".into(),
-        };
-        assert_eq!(err1.name(), "FOO");
-
-        let err2 = EnvError::NotUnicode {
-            name: "BAR".into(),
-        };
-        assert_eq!(err2.name(), "BAR");
-
-        let err3 = EnvError::Invalid {
-            name: "BAZ".into(),
-            value: "xyz".into(),
-            reason: "bad".into(),
-        };
-        assert_eq!(err3.name(), "BAZ");
+    fn list_parsing() {
+        set("TYPEDENV_T7_HOSTS", " a, b ,, c, ");
+        assert_eq!(
+            var_list::<String>("TYPEDENV_T7_HOSTS", ',').unwrap(),
+            ["a", "b", "c"]
+        );
+        set("TYPEDENV_T7_EMPTY", "");
+        assert!(var_list::<u16>("TYPEDENV_T7_EMPTY", ',').unwrap().is_empty());
+        assert_eq!(
+            var_list_or("TYPEDENV_T7_UNSET", ',', vec![1u16]).unwrap(),
+            [1]
+        );
+        assert!(matches!(
+            var_list::<u16>("TYPEDENV_T7_UNSET2", ','),
+            Err(EnvError::Missing { .. })
+        ));
     }
 
     #[test]
-    fn test_errors_display_single() {
-        let mut loader = Loader::new();
-        let _ = loader.var::<u32>("ENVTYPED_TEST_MISSING_SINGLE_VAR");
-        let err = loader.finish().unwrap_err();
-        assert!(err.to_string().starts_with("1 configuration error:"));
-        assert_eq!(err.len(), 1);
-        assert!(!err.is_empty());
+    fn list_error_names_the_item() {
+        set("TYPEDENV_T8_PORTS", "80,http,443");
+        let e = var_list::<u16>("TYPEDENV_T8_PORTS", ',').unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("TYPEDENV_T8_PORTS"), "{msg}");
+        assert!(msg.contains("item 2 (`http`)"), "{msg}");
+    }
+
+    #[test]
+    fn loader_lists() {
+        set("TYPEDENV_T9_TAGS", "x,y");
+        let mut cfg = Loader::new();
+        let tags: Vec<String> = cfg.var_list("TYPEDENV_T9_TAGS", ',');
+        let dflt: Vec<u16> = cfg.var_list_or("TYPEDENV_T9_UNSET", ',', vec![7]);
+        assert_eq!(tags, ["x", "y"]);
+        assert_eq!(dflt, [7]);
+        assert!(cfg.finish().is_ok());
+    }
+
+    #[cfg(feature = "dotenv")]
+    #[test]
+    fn dotenv_parser_syntax() {
+        let src = "\
+# comment
+A=1
+export B = two
+C=\"hello world\" # trailing
+D='raw $x #notcomment'
+E=val # comment
+F=\"line\\nbreak\"
+G=
+H=# only comment
+";
+        let (vars, errs) = parse_dotenv(src);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(vars["A"], "1");
+        assert_eq!(vars["B"], "two");
+        assert_eq!(vars["C"], "hello world");
+        assert_eq!(vars["D"], "raw $x #notcomment");
+        assert_eq!(vars["E"], "val");
+        assert_eq!(vars["F"], "line\nbreak");
+        assert_eq!(vars["G"], "");
+        assert_eq!(vars["H"], "");
+    }
+
+    #[cfg(feature = "dotenv")]
+    #[test]
+    fn dotenv_parser_reports_line_errors() {
+        let (vars, errs) = parse_dotenv("OK=1\nBAD\nQ=\"abc\n=nokey\nZ=\"x\" junk\n");
+        assert_eq!(vars.len(), 1);
+        let lines: Vec<usize> = errs.iter().map(|(n, _)| *n).collect();
+        assert_eq!(lines, [2, 3, 4, 5]);
+    }
+
+    #[cfg(feature = "dotenv")]
+    #[test]
+    fn dotenv_file_loading_and_precedence() {
+        let path = env::temp_dir().join(format!("typedenv-test-{}.env", std::process::id()));
+        std::fs::write(
+            &path,
+            "TYPEDENV_T10_PORT=7000\nTYPEDENV_T10_FROM_ENV=file\nTYPEDENV_T10_DB=postgres://x\n",
+        )
+        .unwrap();
+        set("TYPEDENV_T10_FROM_ENV", "env");
+
+        let mut cfg = Loader::new().with_dotenv(&path);
+        let port: u16 = cfg.var("TYPEDENV_T10_PORT");
+        let db: String = cfg.var("TYPEDENV_T10_DB");
+        let which: String = cfg.var("TYPEDENV_T10_FROM_ENV");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(port, 7000);
+        assert_eq!(db, "postgres://x");
+        assert_eq!(which, "env"); // real env wins over the file
+        assert!(cfg.finish().is_ok());
+        // the process environment was not modified
+        assert!(env::var("TYPEDENV_T10_PORT").is_err());
+    }
+
+    #[cfg(feature = "dotenv")]
+    #[test]
+    fn dotenv_missing_file_is_ignored_but_syntax_errors_are_reported() {
+        let cfg = Loader::new().with_dotenv("definitely/not/here.env");
+        assert!(cfg.finish().is_ok());
+
+        let path = env::temp_dir().join(format!("typedenv-bad-{}.env", std::process::id()));
+        std::fs::write(&path, "NOEQUALS\n").unwrap();
+        let errs = Loader::new().with_dotenv(&path).finish().unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(errs.len(), 1);
+        assert!(errs.to_string().contains(":1: invalid .env syntax"));
     }
 }
