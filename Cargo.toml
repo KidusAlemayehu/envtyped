@@ -5,7 +5,7 @@ edition = "2024"
 description = "Tiny, zero-dependency typed access to environment variables"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/KidusAlemayehu/envtyped"
+repository = "https://github.com/KidusAlemayehu/typedenv"
 keywords = ["env", "environment", "config", "configuration"]
 categories = ["config"]
 
